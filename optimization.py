@@ -5,30 +5,29 @@ import sys
 import math
 
 print("="*60)
-print(" TEKNOFEST Fleet Optimization Engine (Phase 1)")
+print(" TEKNOFEST Fleet Optimization Engine (Phase 1) - UPDATED RULES")
 print("="*60)
 
-# --- 1. Load All Required Files (Updated for Safe Filenames) ---
+# --- 1. Load All Required Files ---
 print("\n[1/4] Loading Excel files...")
 try:
     df_pred = pd.read_excel("Tahmin_Ciktisi.xlsx")
     df_coords = pd.read_excel("Koordinatlar.xlsx")
-    df_rentals = pd.read_excel("Kiralik_Araclar.xlsx")          # Safely named
-    df_costs = pd.read_excel("Arac_Kapasite_Maliyet.xlsx")      # Safely named
+    df_rentals = pd.read_excel("Kiralik_Araclar.xlsx")
+    df_costs = pd.read_excel("Arac_Kapasite_Maliyet.xlsx")
 except FileNotFoundError as e:
     print(f"\n[ERROR] Missing file: {e}")
     print("Please make sure all 4 Excel files are in this folder.")
     sys.exit(1)
 
 # --- 2. Calculate Distances (Haversine Formula) ---
-print("[2/4] Calculating true route distances...")
+print("[2/4] Calculating true route distances (Rule 6)...")
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371.0 # Earth radius in kilometers
     dlat, dlon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
     a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
     return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
 
-# Create a coordinate dictionary
 coords_dict = {}
 for _, row in df_coords.iterrows():
     coords_dict[row['Transfer Merkezi']] = (row['Enlem'], row['Boylam'])
@@ -73,17 +72,40 @@ for index, row in df_pred.iterrows():
     if not solver:
         continue
 
-    k_vars = {v: solver.IntVar(0, int(rental_limits.get(v, 0)), f'kiralik_{v}') for v in vehicles}
-    s_vars = {v: solver.IntVar(0, 100, f'spot_{v}') for v in vehicles} 
+    # Setup tracking variables
+    k_count = {}
+    k_desi = {}
+    s_count = {}
+    s_desi = {}
 
-    solver.Add(sum((k_vars[v] + s_vars[v]) * capacity[v] for v in vehicles) >= demand)
+    for v in vehicles:
+        # KURAL 1 & 3: Kiralık araçlar ZORUNLU yola çıkar. Sayıları sabittir.
+        limit = int(rental_limits.get(v, 0))
+        k_count[v] = limit
+        # Bu kiralık araçlara atanacak toplam desi (Sürekli Değişken)
+        k_desi[v] = solver.NumVar(0, limit * capacity[v], f'k_desi_{v}')
+        
+        # Spot araçlar (Tamsayı Değişken)
+        s_count[v] = solver.IntVar(0, 100, f's_count_{v}')
+        # Bu spot araçlara atanacak toplam desi (Sürekli Değişken)
+        s_desi[v] = solver.NumVar(0, solver.infinity(), f's_desi_{v}')
+        
+        # Spot Kapasite Kısıtı
+        solver.Add(s_desi[v] <= s_count[v] * capacity[v])
+        
+        # YENİ KURAL 1: Spot araç seçilirse en az %10'u dolmak zorundadır!
+        solver.Add(s_desi[v] >= s_count[v] * (capacity[v] * 0.10))
 
+    # Talep Karşılama Kısıtı
+    solver.Add(sum(k_desi[v] + s_desi[v] for v in vehicles) >= demand)
+
+    # Amaç Fonksiyonu (Maliyet Minimizasyonu)
     cost_expr = []
     for v in vehicles:
         k_cost = rent_fixed[v] + (rent_km[v] * distance)
         s_cost = spot_fixed[v] + (spot_km[v] * distance)
-        cost_expr.append(k_vars[v] * k_cost)
-        cost_expr.append(s_vars[v] * s_cost)
+        cost_expr.append(k_count[v] * k_cost) # Kiralık maliyeti her halükarda ödenir
+        cost_expr.append(s_count[v] * s_cost)
         
     solver.Minimize(sum(cost_expr))
     status = solver.Solve()
@@ -92,19 +114,30 @@ for index, row in df_pred.iterrows():
         route_cost = solver.Objective().Value()
         total_network_cost += route_cost
         
-        assignment = {
-            'Tarih': date,
-            'Çıkış_TM': origin,
-            'Varış_TM': dest,
-            'Talep_Desi': demand,
-            'Mesafe_KM': round(distance, 2),
-            'Toplam_Maliyet_TL': round(route_cost, 2)
-        }
+        # Çıktıları Portalın İstediği Formatta Formatla
         for v in vehicles:
-            assignment[f'Kiralik_{v}'] = k_vars[v].solution_value()
-            assignment[f'Spot_{v}'] = s_vars[v].solution_value()
+            # Eğer o hatta kiralık araç varsa (boş olsa bile eklenir)
+            if k_count[v] > 0:
+                results.append({
+                    'Tarih': date,
+                    'Araç Tipi': f"Kiralık {v}",
+                    'Çıkış TM': origin,
+                    'Varış TM': dest,
+                    'Atanan Desi': round(k_desi[v].solution_value(), 2),
+                    'Maliyet': round(k_count[v] * (rent_fixed[v] + (rent_km[v] * distance)), 2)
+                })
             
-        results.append(assignment)
+            # Eğer spot araç kullanılmışsa
+            s_val = int(s_count[v].solution_value())
+            if s_val > 0:
+                results.append({
+                    'Tarih': date,
+                    'Araç Tipi': f"Spot {v}",
+                    'Çıkış TM': origin,
+                    'Varış TM': dest,
+                    'Atanan Desi': round(s_desi[v].solution_value(), 2),
+                    'Maliyet': round(s_val * (spot_fixed[v] + (spot_km[v] * distance)), 2)
+                })
 
 # --- 5. Export Final Results ---
 print("\n" + "="*60)
