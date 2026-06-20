@@ -8,7 +8,7 @@ This repository contains the logistics optimization solution for the period of M
 - **Fleet Optimization:** Google OR-Tools (MILP) solver used to minimize transport costs under rental and capacity constraints.
 
 ## Final Result
-**Total Fleet Cost: 9,948,347.49 TL**
+**TOTAL FLEET COST: 10,942,029.55 TL**
 
 ## Included Files
 - `teknofest_desi_tahmin.py`: Demand forecasting pipeline.
